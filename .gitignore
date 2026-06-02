@@ -1,0 +1,11 @@
+# clasp (Google Apps Script CLI) — contêm credenciais, NUNCA commitar
+.clasp.json
+.clasprc.json
+
+# Node
+node_modules/
+npm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
