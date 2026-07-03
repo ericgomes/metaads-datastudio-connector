@@ -4,12 +4,12 @@
   "exceptionLogging": "STACKDRIVER",
   "runtimeVersion": "V8",
   "dataStudio": {
-    "name": "Meta Ads – Agência",
+    "name": "Meta Ads",
     "logoUrl": "https://www.gstatic.com/images/branding/product/2x/data_studio_48dp.png",
-    "company": "Agência",
-    "companyUrl": "",
-    "addonUrl": "https://lookerstudio.google.com",
-    "supportUrl": "https://lookerstudio.google.com",
+    "company": "Agência Linka",
+    "companyUrl": "https://agencialinka.com.br",
+    "addonUrl": "https://agencialinka.com.br",
+    "supportUrl": "https://agencialinka.com.br",
     "description": "Conector Meta Ads (Facebook/Instagram Ads) para Looker Studio. Suporta múltiplas contas, breakdowns por campanha/conjunto/anúncio/plataforma e as principais métricas de performance.",
     "sources": ["Meta Ads"]
   },
