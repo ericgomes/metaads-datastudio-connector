@@ -5,6 +5,11 @@ var META_API_BASE = 'https://graph.facebook.com/v19.0';
 // Auth
 // ---------------------------------------------------------------------------
 
+function isAdminUser() {
+  // Habilita a exibição das mensagens de debug (setDebugText) para você.
+  return true;
+}
+
 function getAuthType() {
   return CC.newAuthTypeResponse()
     .setAuthType(CC.AuthType.USER_TOKEN)
@@ -127,6 +132,7 @@ function getSchema(request) {
 
   // Dimensions
   f.newDimension().setId('date').setName('Data').setType(T.YEAR_MONTH_DAY);
+  f.newDimension().setId('account_id').setName('ID Conta').setType(T.TEXT);
   f.newDimension().setId('account_name').setName('Conta').setType(T.TEXT);
   f.newDimension().setId('campaign_id').setName('ID Campanha').setType(T.TEXT);
   f.newDimension().setId('campaign_name').setName('Campanha').setType(T.TEXT);
@@ -173,6 +179,17 @@ function getSchema(request) {
 // ---------------------------------------------------------------------------
 
 function getData(request) {
+  try {
+    return buildData(request);
+  } catch (e) {
+    CC.newUserError()
+      .setDebugText('getData: ' + (e.stack || e.message || e))
+      .setText('Erro ao carregar dados: ' + (e.message || e))
+      .throwException();
+  }
+}
+
+function buildData(request) {
   var token      = PropertiesService.getUserProperties().getProperty('dscc.token');
   var accountId  = request.configParams.ad_account_id;
   var startDate  = request.dateRange.startDate;
@@ -192,25 +209,88 @@ function getData(request) {
   return { schema: reqSchema, rows: rows };
 }
 
+// Campos buscados em cada chamada (ver fetchInsights para o porquê da divisão).
+var DELIVERY_FIELDS = [
+  'date_start',
+  'account_id', 'account_name',
+  'campaign_id', 'campaign_name',
+  'adset_id', 'adset_name',
+  'ad_id', 'ad_name',
+  'impressions', 'clicks', 'spend', 'reach'
+];
+var ACTION_FIELDS = [
+  'date_start', 'ad_id',
+  'actions', 'action_values', 'video_p100_watched_actions'
+];
+
+// Tamanho da janela (em dias) por chamada à API. Com breakdown por plataforma +
+// incremento diário, períodos longos estouram o limite SÍNCRONO do Meta (que
+// então devolve vazio sem erro). Fatiar em ~30 dias mantém cada consulta dentro
+// do limite. Ver contexto no histórico do projeto.
+var CHUNK_DAYS = 30;
+
 function fetchInsights(token, accountId, startDate, endDate) {
-  // Sempre no grão mais fino: nível de anúncio + breakdown por plataforma.
-  // Assim o Looker Studio consegue agregar para qualquer nível (conta,
-  // campanha, conjunto, anúncio ou plataforma) apenas escolhendo dimensões.
-  var fields = [
-    'date_start',
-    'account_name',
-    'campaign_id', 'campaign_name',
-    'adset_id', 'adset_name',
-    'ad_id', 'ad_name',
-    'impressions', 'clicks', 'spend', 'reach',
-    'actions', 'action_values',
-    'video_p100_watched_actions'
-  ].join(',');
+  // Grão mais fino: anúncio + plataforma, para o Looker agregar em qualquer
+  // nível (conta/campanha/conjunto/anúncio/plataforma) só escolhendo dimensões.
+  //
+  // Duas chamadas por janela, AMBAS com breakdown de plataforma:
+  //   1) entrega: impressions/clicks/spend/reach
+  //   2) ações:   actions/action_values/video (conversões, leads, etc.)
+  // A API zera a entrega quando breakdown + campos de `actions` vêm juntos, por
+  // isso são separadas e mescladas por (ad_id + data + plataforma).
+  var windows = dateWindows(startDate, endDate, CHUNK_DAYS);
 
-  var timeRange = encodeURIComponent('{"since":"' + startDate + '","until":"' + endDate + '"}');
+  var deliveryRows = [];
+  var actionRows   = [];
+  windows.forEach(function (w) {
+    var tr = encodeURIComponent('{"since":"' + w.since + '","until":"' + w.until + '"}');
+    deliveryRows = deliveryRows.concat(fetchInsightsPaged(token, accountId, DELIVERY_FIELDS, tr));
+    actionRows   = actionRows.concat(fetchInsightsPaged(token, accountId, ACTION_FIELDS, tr));
+  });
 
-  var base = META_API_BASE + '/' + accountId + '/insights'
-    + '?fields=' + fields
+  // Indexa as ações por chave e mescla nas linhas de entrega.
+  var actionMap = {};
+  actionRows.forEach(function (r) { actionMap[mergeKey(r)] = r; });
+
+  deliveryRows.forEach(function (r) {
+    var a = actionMap[mergeKey(r)];
+    if (a) {
+      r.actions                     = a.actions;
+      r.action_values               = a.action_values;
+      r.video_p100_watched_actions  = a.video_p100_watched_actions;
+    }
+  });
+
+  return deliveryRows;
+}
+
+function mergeKey(row) {
+  return (row.ad_id || '') + '|' + (row.date_start || '') + '|' + (row.publisher_platform || '');
+}
+
+// Divide [startDate, endDate] (YYYY-MM-DD) em janelas de no máximo `days` dias.
+function dateWindows(startDate, endDate, days) {
+  var windows = [];
+  var cur = new Date(startDate + 'T00:00:00Z');
+  var end = new Date(endDate + 'T00:00:00Z');
+  while (cur <= end) {
+    var winEnd = new Date(cur.getTime());
+    winEnd.setUTCDate(winEnd.getUTCDate() + days - 1);
+    if (winEnd > end) winEnd = end;
+    windows.push({ since: ymd(cur), until: ymd(winEnd) });
+    cur = new Date(winEnd.getTime());
+    cur.setUTCDate(cur.getUTCDate() + 1);
+  }
+  return windows;
+}
+
+function ymd(d) {
+  return d.toISOString().slice(0, 10);
+}
+
+function fetchInsightsPaged(token, accountId, fieldsArray, timeRange) {
+  var url = META_API_BASE + '/' + accountId + '/insights'
+    + '?fields=' + fieldsArray.join(',')
     + '&time_range=' + timeRange
     + '&time_increment=1'
     + '&level=ad'
@@ -219,8 +299,6 @@ function fetchInsights(token, accountId, startDate, endDate) {
     + '&access_token=' + encodeURIComponent(token);
 
   var allData = [];
-  var url = base;
-
   while (url) {
     var resp = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
     var data = JSON.parse(resp.getContentText());
@@ -235,7 +313,6 @@ function fetchInsights(token, accountId, startDate, endDate) {
     if (data.data) allData = allData.concat(data.data);
     url = (data.paging && data.paging.next) ? data.paging.next : null;
   }
-
   return allData;
 }
 
@@ -246,6 +323,7 @@ function fetchInsights(token, accountId, startDate, endDate) {
 function extractValue(fieldName, row) {
   switch (fieldName) {
     case 'date':             return (row.date_start || '').replace(/-/g, '');
+    case 'account_id':       return row.account_id    || '';
     case 'account_name':     return row.account_name  || '';
     case 'campaign_id':      return row.campaign_id   || '';
     case 'campaign_name':    return row.campaign_name || '';
