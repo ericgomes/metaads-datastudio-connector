@@ -50,14 +50,36 @@ function resetAuth() {
 // ---------------------------------------------------------------------------
 
 function getConfig(request) {
-  var config = CC.newConfig();
+  try {
+    return buildConfig(request);
+  } catch (e) {
+    // Surface the real error in the Looker Studio dialog instead of the
+    // generic "error caused by this connector" message.
+    CC.newUserError()
+      .setDebugText('getConfig: ' + (e.stack || e.message || e))
+      .setText('Erro ao carregar configuração: ' + (e.message || e))
+      .throwException();
+  }
+}
+
+function buildConfig(request) {
+  var config = CC.getConfig();
   var token  = PropertiesService.getUserProperties().getProperty('dscc.token');
   var accounts = fetchAdAccounts(token);
 
   var accountSelect = config.newSelectSingle()
     .setId('ad_account_id')
-    .setName('Conta de Anúncios')
-    .setIsDynamic(true);
+    .setName('Conta de Anúncios');
+
+  if (!accounts.length) {
+    // Sem contas: o token é válido mas nenhuma conta de anúncios foi
+    // vinculada ao System User. Evita um select vazio (que quebra a UI).
+    accountSelect.addOption(
+      config.newOptionBuilder()
+        .setLabel('Nenhuma conta encontrada — vincule contas ao System User')
+        .setValue('')
+    );
+  }
 
   accounts.forEach(function (acc) {
     accountSelect.addOption(
@@ -81,14 +103,21 @@ function getConfig(request) {
 }
 
 function fetchAdAccounts(token) {
-  var url = META_API_BASE + '/me/adaccounts?fields=account_id,name&limit=200&access_token=' + token;
+  if (!token) throw new Error('Token ausente. Refaça a autenticação.');
+  var url = META_API_BASE + '/me/adaccounts?fields=account_id,name&limit=200'
+    + '&access_token=' + encodeURIComponent(token);
   var resp = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
-  var data = JSON.parse(resp.getContentText());
+  var text = resp.getContentText();
+  var data;
+  try {
+    data = JSON.parse(text);
+  } catch (e) {
+    throw new Error('Resposta inesperada do Meta (HTTP ' + resp.getResponseCode() + '): '
+      + text.slice(0, 200));
+  }
   if (data.error) {
-    CC.newUserError()
-      .setDebugText(data.error.message)
-      .setText('Erro ao buscar contas: ' + data.error.message)
-      .throwException();
+    throw new Error('API do Meta: ' + data.error.message
+      + ' (code ' + data.error.code + ')');
   }
   return data.data || [];
 }
