@@ -14,21 +14,31 @@ function getAuthType() {
 
 function isAuthValid() {
   var token = PropertiesService.getUserProperties().getProperty('dscc.token');
+  return validateToken(token);
+}
+
+function setCredentials(request) {
+  // USER_TOKEN envia { username, token }. O Meta só usa o token;
+  // o username é ignorado (obrigatório apenas na UI do Looker Studio).
+  var token = request.userToken.token;
+  if (!validateToken(token)) {
+    return { errorCode: 'INVALID_CREDENTIALS' };
+  }
+  PropertiesService.getUserProperties().setProperty('dscc.token', token);
+  return { errorCode: 'NONE' };
+}
+
+function validateToken(token) {
   if (!token) return false;
   try {
     var resp = UrlFetchApp.fetch(
-      META_API_BASE + '/me?access_token=' + token,
+      META_API_BASE + '/me?access_token=' + encodeURIComponent(token),
       { muteHttpExceptions: true }
     );
     return !JSON.parse(resp.getContentText()).error;
   } catch (e) {
     return false;
   }
-}
-
-function setCredentials(request) {
-  PropertiesService.getUserProperties().setProperty('dscc.token', request.userToken);
-  return { errorCode: 'NONE' };
 }
 
 function resetAuth() {
