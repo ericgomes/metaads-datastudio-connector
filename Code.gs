@@ -141,19 +141,28 @@ function getSchema(request) {
   f.newMetric().setId('link_clicks').setName('Cliques no Link').setType(T.NUMBER).setAggregation(A.SUM);
   f.newMetric().setId('spend').setName('Investimento').setType(T.CURRENCY_BRL).setAggregation(A.SUM);
   f.newMetric().setId('reach').setName('Alcance').setType(T.NUMBER).setAggregation(A.SUM);
-  f.newMetric().setId('frequency').setName('Frequência').setType(T.NUMBER).setAggregation(A.AUTO);
-  f.newMetric().setId('cpm').setName('CPM').setType(T.CURRENCY_BRL).setAggregation(A.AUTO);
-  f.newMetric().setId('cpc').setName('CPC').setType(T.CURRENCY_BRL).setAggregation(A.AUTO);
-  f.newMetric().setId('ctr').setName('CTR').setType(T.PERCENT).setAggregation(A.AUTO);
+  // Métricas de razão: definidas como fórmulas para agregar corretamente em
+  // qualquer nível (o Looker soma as bases e só depois divide).
+  f.newMetric().setId('frequency').setName('Frequência').setType(T.NUMBER)
+    .setFormula('SUM($impressions) / SUM($reach)').setAggregation(A.AUTO);
+  f.newMetric().setId('cpm').setName('CPM').setType(T.CURRENCY_BRL)
+    .setFormula('SUM($spend) / SUM($impressions) * 1000').setAggregation(A.AUTO);
+  f.newMetric().setId('cpc').setName('CPC').setType(T.CURRENCY_BRL)
+    .setFormula('SUM($spend) / SUM($clicks)').setAggregation(A.AUTO);
+  f.newMetric().setId('ctr').setName('CTR').setType(T.PERCENT)
+    .setFormula('SUM($clicks) / SUM($impressions)').setAggregation(A.AUTO);
   f.newMetric().setId('conversions').setName('Conversões').setType(T.NUMBER).setAggregation(A.SUM);
   f.newMetric().setId('conversion_value').setName('Valor de Conversão').setType(T.CURRENCY_BRL).setAggregation(A.SUM);
-  f.newMetric().setId('roas').setName('ROAS').setType(T.NUMBER).setAggregation(A.AUTO);
-  f.newMetric().setId('cost_per_conversion').setName('Custo por Conversão').setType(T.CURRENCY_BRL).setAggregation(A.AUTO);
+  f.newMetric().setId('roas').setName('ROAS').setType(T.NUMBER)
+    .setFormula('SUM($conversion_value) / SUM($spend)').setAggregation(A.AUTO);
+  f.newMetric().setId('cost_per_conversion').setName('Custo por Conversão').setType(T.CURRENCY_BRL)
+    .setFormula('SUM($spend) / SUM($conversions)').setAggregation(A.AUTO);
   f.newMetric().setId('video_views').setName('Views de Vídeo (100%)').setType(T.NUMBER).setAggregation(A.SUM);
   f.newMetric().setId('post_engagement').setName('Engajamento').setType(T.NUMBER).setAggregation(A.SUM);
   f.newMetric().setId('page_likes').setName('Curtidas na Página').setType(T.NUMBER).setAggregation(A.SUM);
   f.newMetric().setId('leads').setName('Leads').setType(T.NUMBER).setAggregation(A.SUM);
-  f.newMetric().setId('cost_per_lead').setName('Custo por Lead').setType(T.CURRENCY_BRL).setAggregation(A.AUTO);
+  f.newMetric().setId('cost_per_lead').setName('Custo por Lead').setType(T.CURRENCY_BRL)
+    .setFormula('SUM($spend) / SUM($leads)').setAggregation(A.AUTO);
 
   return { schema: f.build() };
 }
@@ -191,8 +200,7 @@ function fetchInsights(token, accountId, startDate, endDate) {
     'campaign_id', 'campaign_name',
     'adset_id', 'adset_name',
     'ad_id', 'ad_name',
-    'impressions', 'clicks', 'spend', 'reach', 'frequency',
-    'cpm', 'cpc', 'ctr',
+    'impressions', 'clicks', 'spend', 'reach',
     'actions', 'action_values',
     'video_p100_watched_actions'
   ].join(',');
@@ -247,32 +255,15 @@ function extractValue(fieldName, row) {
     case 'clicks':           return intVal(row.clicks);
     case 'spend':            return floatVal(row.spend);
     case 'reach':            return intVal(row.reach);
-    case 'frequency':        return floatVal(row.frequency);
-    case 'cpm':              return floatVal(row.cpm);
-    case 'cpc':              return floatVal(row.cpc);
-    case 'ctr':              return floatVal(row.ctr) / 100;
     case 'link_clicks':      return actionInt(row.actions, 'link_click');
     case 'conversions':      return purchaseInt(row.actions);
     case 'conversion_value': return purchaseFloat(row.action_values);
-    case 'roas': {
-      var cv = purchaseFloat(row.action_values);
-      var sp = floatVal(row.spend);
-      return sp > 0 ? cv / sp : 0;
-    }
-    case 'cost_per_conversion': {
-      var conv = purchaseInt(row.actions);
-      var sp2  = floatVal(row.spend);
-      return conv > 0 ? sp2 / conv : 0;
-    }
     case 'video_views':      return actionInt(row.video_p100_watched_actions, 'video_view');
     case 'post_engagement':  return actionInt(row.actions, 'post_engagement');
     case 'page_likes':       return actionInt(row.actions, 'like');
-    case 'leads':            return actionInt(row.actions, 'lead') || actionInt(row.actions, 'onsite_conversion.lead_grouped');
-    case 'cost_per_lead': {
-      var leads = actionInt(row.actions, 'lead') || actionInt(row.actions, 'onsite_conversion.lead_grouped');
-      var sp3   = floatVal(row.spend);
-      return leads > 0 ? sp3 / leads : 0;
-    }
+    case 'leads':            return leadCount(row.actions);
+    // frequency, cpm, cpc, ctr, roas, cost_per_conversion e cost_per_lead
+    // são campos com fórmula (getSchema) e calculados pelo Looker Studio.
     default: return null;
   }
 }
@@ -288,6 +279,12 @@ function getAction(actions, type) {
 function actionInt(actions, type) {
   var a = getAction(actions, type);
   return a ? parseInt(a.value, 10) : 0;
+}
+
+function leadCount(actions) {
+  // Prioriza 'lead' (form/pixel padrão); se ausente, usa o agrupado onsite.
+  return actionInt(actions, 'lead')
+      || actionInt(actions, 'onsite_conversion.lead_grouped');
 }
 
 function purchaseInt(actions) {
