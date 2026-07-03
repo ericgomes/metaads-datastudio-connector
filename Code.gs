@@ -196,7 +196,7 @@ function buildData(request) {
   var endDate    = request.dateRange.endDate;
   var reqFields  = request.fields.map(function (f) { return f.name; });
 
-  var rawData    = fetchInsights(token, accountId, startDate, endDate);
+  var rawData    = fetchInsights(token, accountId, startDate, endDate, reqFields);
   var allSchema  = getSchema(request).schema;
   var reqSchema  = allSchema.filter(function (s) { return reqFields.indexOf(s.name) >= 0; });
 
@@ -209,63 +209,106 @@ function buildData(request) {
   return { schema: reqSchema, rows: rows };
 }
 
-// Campos buscados em cada chamada (ver fetchInsights para o porquê da divisão).
-var DELIVERY_FIELDS = [
-  'date_start',
-  'account_id', 'account_name',
-  'campaign_id', 'campaign_name',
-  'adset_id', 'adset_name',
-  'ad_id', 'ad_name',
-  'impressions', 'clicks', 'spend', 'reach'
-];
-var ACTION_FIELDS = [
-  'date_start', 'ad_id',
-  'actions', 'action_values', 'video_p100_watched_actions'
-];
+// Dimensões do schema (o resto de request.fields são métricas).
+var DIMENSION_IDS = ['date', 'account_id', 'account_name', 'campaign_id', 'campaign_name',
+  'adset_id', 'adset_name', 'ad_id', 'ad_name', 'platform'];
 
-// Tamanho da janela (em dias) por chamada à API. Com breakdown por plataforma +
-// incremento diário, períodos longos estouram o limite SÍNCRONO do Meta (que
-// então devolve vazio sem erro). Fatiar em ~30 dias mantém cada consulta dentro
-// do limite. Ver contexto no histórico do projeto.
+// Métricas derivadas do array `actions` — exigem buscar actions/action_values/video.
+// Inclui as fórmulas cujas bases são de ação (roas→conversion_value, etc.).
+var ACTION_METRIC_IDS = ['link_clicks', 'conversions', 'conversion_value', 'video_views',
+  'post_engagement', 'page_likes', 'leads', 'roas', 'cost_per_conversion', 'cost_per_lead'];
+
+// Janela (dias) por chamada QUANDO há breakdown de plataforma: período longo +
+// breakdown estoura o limite SÍNCRONO do Meta (devolve vazio sem erro). Sem
+// breakdown não é preciso fatiar — a consulta no nível pedido resolve.
 var CHUNK_DAYS = 30;
 
-function fetchInsights(token, accountId, startDate, endDate) {
-  // Grão mais fino: anúncio + plataforma, para o Looker agregar em qualquer
-  // nível (conta/campanha/conjunto/anúncio/plataforma) só escolhendo dimensões.
-  //
-  // Duas chamadas por janela, AMBAS com breakdown de plataforma:
-  //   1) entrega: impressions/clicks/spend/reach
-  //   2) ações:   actions/action_values/video (conversões, leads, etc.)
-  // A API zera a entrega quando breakdown + campos de `actions` vêm juntos, por
-  // isso são separadas e mescladas por (ad_id + data + plataforma).
-  var windows = dateWindows(startDate, endDate, CHUNK_DAYS);
+// Consulta o Meta NO NÍVEL que o gráfico pede (definido pelas dimensões em
+// reqFields). Métricas aditivas ficam corretas e o Meta deduplica Alcance/
+// Frequência no nível certo (somar alcance entre anúncios/plataformas infla).
+function fetchInsights(token, accountId, startDate, endDate, reqFields) {
+  var dims        = reqFields.filter(function (f) { return DIMENSION_IDS.indexOf(f) >= 0; });
+  var level       = chooseLevel(dims);
+  var byPlatform  = dims.indexOf('platform') >= 0;
+  var byDay       = dims.indexOf('date') >= 0;
+  var needActions = reqFields.some(function (f) { return ACTION_METRIC_IDS.indexOf(f) >= 0; });
+
+  var deliveryMetrics = ['impressions', 'clicks', 'spend', 'reach'];
+  var actionApiFields = ['actions', 'action_values', 'video_p100_watched_actions'];
+
+  // Sem breakdown: entrega + actions na MESMA chamada (o zeramento só ocorre com
+  // breakdown) e SEM fatiar (a consulta no nível pedido cabe no limite síncrono).
+  // Alcance vem deduplicado pelo Meta no nível certo.
+  if (!byPlatform) {
+    var opts   = { level: level, breakdown: '', daily: byDay };
+    var fields = (byDay ? ['date_start'] : []).concat(hierarchyFields(level), deliveryMetrics);
+    if (needActions) fields = fields.concat(actionApiFields);
+    return fetchInsightsPaged(token, accountId, fields, timeRange(startDate, endDate), opts);
+  }
+
+  // Com breakdown de plataforma: sempre diário (para a chave de merge ser única
+  // por dia×plataforma), fatiado em janelas, entrega e actions separadas e
+  // mescladas por (id do nível + data + plataforma).
+  var optsP   = { level: level, breakdown: 'publisher_platform', daily: true };
+  var idField = primaryIdField(level);
+  var deliveryFields = ['date_start'].concat(hierarchyFields(level), deliveryMetrics);
+  var actionFields   = ['date_start', idField].concat(actionApiFields);
 
   var deliveryRows = [];
   var actionRows   = [];
-  windows.forEach(function (w) {
-    var tr = encodeURIComponent('{"since":"' + w.since + '","until":"' + w.until + '"}');
-    deliveryRows = deliveryRows.concat(fetchInsightsPaged(token, accountId, DELIVERY_FIELDS, tr));
-    actionRows   = actionRows.concat(fetchInsightsPaged(token, accountId, ACTION_FIELDS, tr));
-  });
-
-  // Indexa as ações por chave e mescla nas linhas de entrega.
-  var actionMap = {};
-  actionRows.forEach(function (r) { actionMap[mergeKey(r)] = r; });
-
-  deliveryRows.forEach(function (r) {
-    var a = actionMap[mergeKey(r)];
-    if (a) {
-      r.actions                     = a.actions;
-      r.action_values               = a.action_values;
-      r.video_p100_watched_actions  = a.video_p100_watched_actions;
+  dateWindows(startDate, endDate, CHUNK_DAYS).forEach(function (w) {
+    var tr = timeRange(w.since, w.until);
+    deliveryRows = deliveryRows.concat(fetchInsightsPaged(token, accountId, deliveryFields, tr, optsP));
+    if (needActions) {
+      actionRows = actionRows.concat(fetchInsightsPaged(token, accountId, actionFields, tr, optsP));
     }
   });
+
+  if (needActions) {
+    var key = function (r) {
+      return (r[idField] || '') + '|' + (r.date_start || '') + '|' + (r.publisher_platform || '');
+    };
+    var actionMap = {};
+    actionRows.forEach(function (r) { actionMap[key(r)] = r; });
+    deliveryRows.forEach(function (r) {
+      var a = actionMap[key(r)];
+      if (a) {
+        r.actions                    = a.actions;
+        r.action_values              = a.action_values;
+        r.video_p100_watched_actions = a.video_p100_watched_actions;
+      }
+    });
+  }
 
   return deliveryRows;
 }
 
-function mergeKey(row) {
-  return (row.ad_id || '') + '|' + (row.date_start || '') + '|' + (row.publisher_platform || '');
+// Nível da API do Meta conforme a dimensão de hierarquia mais fina pedida.
+function chooseLevel(dims) {
+  if (dims.indexOf('ad_id') >= 0 || dims.indexOf('ad_name') >= 0) return 'ad';
+  if (dims.indexOf('adset_id') >= 0 || dims.indexOf('adset_name') >= 0) return 'adset';
+  if (dims.indexOf('campaign_id') >= 0 || dims.indexOf('campaign_name') >= 0) return 'campaign';
+  return 'account';
+}
+
+// Campos de id/nome de hierarquia disponíveis no nível (do topo até o nível).
+function hierarchyFields(level) {
+  var f = ['account_id', 'account_name'];
+  if (level === 'campaign' || level === 'adset' || level === 'ad') f = f.concat(['campaign_id', 'campaign_name']);
+  if (level === 'adset' || level === 'ad') f = f.concat(['adset_id', 'adset_name']);
+  if (level === 'ad') f = f.concat(['ad_id', 'ad_name']);
+  return f;
+}
+
+function primaryIdField(level) {
+  return level === 'ad'       ? 'ad_id'
+       : level === 'adset'    ? 'adset_id'
+       : level === 'campaign' ? 'campaign_id'
+       : 'account_id';
+}
+
+function timeRange(since, until) {
+  return encodeURIComponent('{"since":"' + since + '","until":"' + until + '"}');
 }
 
 // Divide [startDate, endDate] (YYYY-MM-DD) em janelas de no máximo `days` dias.
@@ -288,15 +331,15 @@ function ymd(d) {
   return d.toISOString().slice(0, 10);
 }
 
-function fetchInsightsPaged(token, accountId, fieldsArray, timeRange) {
+function fetchInsightsPaged(token, accountId, fieldsArray, timeRangeParam, opts) {
   var url = META_API_BASE + '/' + accountId + '/insights'
     + '?fields=' + fieldsArray.join(',')
-    + '&time_range=' + timeRange
-    + '&time_increment=1'
-    + '&level=ad'
-    + '&breakdowns=publisher_platform'
+    + '&time_range=' + timeRangeParam
+    + '&level=' + opts.level
     + '&limit=500'
     + '&access_token=' + encodeURIComponent(token);
+  if (opts.daily)     url += '&time_increment=1';
+  if (opts.breakdown) url += '&breakdowns=' + opts.breakdown;
 
   var allData = [];
   while (url) {
