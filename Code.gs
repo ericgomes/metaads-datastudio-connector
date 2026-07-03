@@ -89,15 +89,9 @@ function buildConfig(request) {
     );
   });
 
-  config.newSelectSingle()
-    .setId('breakdown')
-    .setName('Nível de Detalhamento')
-    .addOption(config.newOptionBuilder().setLabel('Conta (sem breakdown)').setValue('account'))
-    .addOption(config.newOptionBuilder().setLabel('Campanha').setValue('campaign'))
-    .addOption(config.newOptionBuilder().setLabel('Conjunto de Anúncios').setValue('adset'))
-    .addOption(config.newOptionBuilder().setLabel('Anúncio').setValue('ad'))
-    .addOption(config.newOptionBuilder().setLabel('Plataforma').setValue('platform'));
-
+  // Sem seletor de nível: os dados vêm no grão mais fino (anúncio + plataforma)
+  // e o usuário escolhe o nível de detalhamento no relatório, arrastando as
+  // dimensões (campanha / conjunto / anúncio / plataforma, ou nenhuma = conta).
   config.setDateRangeRequired(true);
   return config.build();
 }
@@ -171,12 +165,11 @@ function getSchema(request) {
 function getData(request) {
   var token      = PropertiesService.getUserProperties().getProperty('dscc.token');
   var accountId  = request.configParams.ad_account_id;
-  var breakdown  = request.configParams.breakdown || 'account';
   var startDate  = request.dateRange.startDate;
   var endDate    = request.dateRange.endDate;
   var reqFields  = request.fields.map(function (f) { return f.name; });
 
-  var rawData    = fetchInsights(token, accountId, breakdown, startDate, endDate);
+  var rawData    = fetchInsights(token, accountId, startDate, endDate);
   var allSchema  = getSchema(request).schema;
   var reqSchema  = allSchema.filter(function (s) { return reqFields.indexOf(s.name) >= 0; });
 
@@ -189,9 +182,10 @@ function getData(request) {
   return { schema: reqSchema, rows: rows };
 }
 
-function fetchInsights(token, accountId, breakdown, startDate, endDate) {
-  var level = breakdown === 'platform' ? 'account' : breakdown;
-
+function fetchInsights(token, accountId, startDate, endDate) {
+  // Sempre no grão mais fino: nível de anúncio + breakdown por plataforma.
+  // Assim o Looker Studio consegue agregar para qualquer nível (conta,
+  // campanha, conjunto, anúncio ou plataforma) apenas escolhendo dimensões.
   var fields = [
     'date_start',
     'campaign_id', 'campaign_name',
@@ -204,16 +198,15 @@ function fetchInsights(token, accountId, breakdown, startDate, endDate) {
   ].join(',');
 
   var timeRange = encodeURIComponent('{"since":"' + startDate + '","until":"' + endDate + '"}');
-  var breakdownParam = breakdown === 'platform' ? '&breakdowns=publisher_platform' : '';
 
   var base = META_API_BASE + '/' + accountId + '/insights'
     + '?fields=' + fields
     + '&time_range=' + timeRange
     + '&time_increment=1'
-    + '&level=' + level
+    + '&level=ad'
+    + '&breakdowns=publisher_platform'
     + '&limit=500'
-    + '&access_token=' + token
-    + breakdownParam;
+    + '&access_token=' + encodeURIComponent(token);
 
   var allData = [];
   var url = base;
