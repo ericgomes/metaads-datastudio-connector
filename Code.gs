@@ -127,6 +127,7 @@ function getSchema(request) {
 
   // Dimensions
   f.newDimension().setId('date').setName('Data').setType(T.YEAR_MONTH_DAY);
+  f.newDimension().setId('account_name').setName('Conta').setType(T.TEXT);
   f.newDimension().setId('campaign_id').setName('ID Campanha').setType(T.TEXT);
   f.newDimension().setId('campaign_name').setName('Campanha').setType(T.TEXT);
   f.newDimension().setId('adset_id').setName('ID Conjunto').setType(T.TEXT);
@@ -197,6 +198,7 @@ function fetchInsights(token, accountId, startDate, endDate) {
   // campanha, conjunto, anúncio ou plataforma) apenas escolhendo dimensões.
   var fields = [
     'date_start',
+    'account_name',
     'campaign_id', 'campaign_name',
     'adset_id', 'adset_name',
     'ad_id', 'ad_name',
@@ -244,6 +246,7 @@ function fetchInsights(token, accountId, startDate, endDate) {
 function extractValue(fieldName, row) {
   switch (fieldName) {
     case 'date':             return (row.date_start || '').replace(/-/g, '');
+    case 'account_name':     return row.account_name  || '';
     case 'campaign_id':      return row.campaign_id   || '';
     case 'campaign_name':    return row.campaign_name || '';
     case 'adset_id':         return row.adset_id      || '';
