@@ -132,6 +132,7 @@ function getSchema(request) {
 
   // Dimensions
   f.newDimension().setId('date').setName('Data').setType(T.YEAR_MONTH_DAY);
+  f.newDimension().setId('year_month').setName('Data (Ano Mês)').setType(T.YEAR_MONTH);
   f.newDimension().setId('account_id').setName('ID Conta').setType(T.TEXT);
   f.newDimension().setId('account_name').setName('Conta').setType(T.TEXT);
   f.newDimension().setId('campaign_id').setName('ID Campanha').setType(T.TEXT);
@@ -210,7 +211,7 @@ function buildData(request) {
 }
 
 // Dimensões do schema (o resto de request.fields são métricas).
-var DIMENSION_IDS = ['date', 'account_id', 'account_name', 'campaign_id', 'campaign_name',
+var DIMENSION_IDS = ['date', 'year_month', 'account_id', 'account_name', 'campaign_id', 'campaign_name',
   'adset_id', 'adset_name', 'ad_id', 'ad_name', 'platform'];
 
 // Métricas derivadas do array `actions` — exigem buscar actions/action_values/video.
@@ -231,17 +232,24 @@ function fetchInsights(token, accountId, startDate, endDate, reqFields) {
   var level       = chooseLevel(dims);
   var byPlatform  = dims.indexOf('platform') >= 0;
   var byDay       = dims.indexOf('date') >= 0;
+  var byMonth     = dims.indexOf('year_month') >= 0;
   var needActions = reqFields.some(function (f) { return ACTION_METRIC_IDS.indexOf(f) >= 0; });
 
   var deliveryMetrics = ['impressions', 'clicks', 'spend', 'reach'];
   var actionApiFields = ['actions', 'action_values', 'video_p100_watched_actions'];
 
+  // Incremento temporal: diário se a dimensão Data (dia) for usada; mensal se só
+  // Data (Ano Mês); nenhum caso contrário. O incremento mensal faz o Meta
+  // deduplicar Alcance/Frequência POR MÊS (somar os dias inflaria).
+  var increment = byDay ? 1 : (byMonth ? 'monthly' : null);
+  var withDate  = byDay || byMonth;
+
   // Sem breakdown: entrega + actions na MESMA chamada (o zeramento só ocorre com
   // breakdown) e SEM fatiar (a consulta no nível pedido cabe no limite síncrono).
   // Alcance vem deduplicado pelo Meta no nível certo.
   if (!byPlatform) {
-    var opts   = { level: level, breakdown: '', daily: byDay };
-    var fields = (byDay ? ['date_start'] : []).concat(hierarchyFields(level), deliveryMetrics);
+    var opts   = { level: level, breakdown: '', increment: increment };
+    var fields = (withDate ? ['date_start'] : []).concat(hierarchyFields(level), deliveryMetrics);
     if (needActions) fields = fields.concat(actionApiFields);
     return fetchInsightsPaged(token, accountId, fields, timeRange(startDate, endDate), opts);
   }
@@ -249,7 +257,7 @@ function fetchInsights(token, accountId, startDate, endDate, reqFields) {
   // Com breakdown de plataforma: sempre diário (para a chave de merge ser única
   // por dia×plataforma), fatiado em janelas, entrega e actions separadas e
   // mescladas por (id do nível + data + plataforma).
-  var optsP   = { level: level, breakdown: 'publisher_platform', daily: true };
+  var optsP   = { level: level, breakdown: 'publisher_platform', increment: 1 };
   var idField = primaryIdField(level);
   var deliveryFields = ['date_start'].concat(hierarchyFields(level), deliveryMetrics);
   var actionFields   = ['date_start', idField].concat(actionApiFields);
@@ -338,7 +346,7 @@ function fetchInsightsPaged(token, accountId, fieldsArray, timeRangeParam, opts)
     + '&level=' + opts.level
     + '&limit=500'
     + '&access_token=' + encodeURIComponent(token);
-  if (opts.daily)     url += '&time_increment=1';
+  if (opts.increment) url += '&time_increment=' + opts.increment;
   if (opts.breakdown) url += '&breakdowns=' + opts.breakdown;
 
   var allData = [];
@@ -366,6 +374,7 @@ function fetchInsightsPaged(token, accountId, fieldsArray, timeRangeParam, opts)
 function extractValue(fieldName, row) {
   switch (fieldName) {
     case 'date':             return (row.date_start || '').replace(/-/g, '');
+    case 'year_month':       return (row.date_start || '').slice(0, 7).replace('-', '');
     case 'account_id':       return row.account_id    || '';
     case 'account_name':     return row.account_name  || '';
     case 'campaign_id':      return row.campaign_id   || '';
