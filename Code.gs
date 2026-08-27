@@ -131,7 +131,7 @@ function getSchema(request) {
   var A = CC.AggregationType;
 
   // Dimensions
-  f.newDimension().setId('date').setName('Data').setType(T.YEAR_MONTH_DAY);
+  f.newDimension().setId('date').setName('Data (dia)').setType(T.YEAR_MONTH_DAY);
   f.newDimension().setId('year_month').setName('Data (Ano Mês)').setType(T.YEAR_MONTH);
   f.newDimension().setId('account_id').setName('ID Conta').setType(T.TEXT);
   f.newDimension().setId('account_name').setName('Conta').setType(T.TEXT);
