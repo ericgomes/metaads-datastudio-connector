@@ -1,6 +1,12 @@
 var CC = DataStudioApp.createCommunityConnector();
 var META_API_BASE = 'https://graph.facebook.com/v23.0';
 
+// Chave onde o token é guardado (UserProperties). Trocar o sufixo força uma
+// reautenticação única: o Looker deixa de ver a credencial antiga e reexibe a
+// tela de token. Usado ao migrar do token curto do Explorer para o System User
+// Token (que não expira).
+var TOKEN_KEY = 'meta.token.v2';
+
 // ---------------------------------------------------------------------------
 // Auth
 // ---------------------------------------------------------------------------
@@ -18,7 +24,7 @@ function getAuthType() {
 }
 
 function isAuthValid() {
-  var token = PropertiesService.getUserProperties().getProperty('dscc.token');
+  var token = PropertiesService.getUserProperties().getProperty(TOKEN_KEY);
   return validateToken(token);
 }
 
@@ -29,7 +35,7 @@ function setCredentials(request) {
   if (!validateToken(token)) {
     return { errorCode: 'INVALID_CREDENTIALS' };
   }
-  PropertiesService.getUserProperties().setProperty('dscc.token', token);
+  PropertiesService.getUserProperties().setProperty(TOKEN_KEY, token);
   return { errorCode: 'NONE' };
 }
 
@@ -51,7 +57,7 @@ function validateToken(token) {
 }
 
 function resetAuth() {
-  PropertiesService.getUserProperties().deleteProperty('dscc.token');
+  PropertiesService.getUserProperties().deleteProperty(TOKEN_KEY);
 }
 
 // ---------------------------------------------------------------------------
@@ -73,7 +79,7 @@ function getConfig(request) {
 
 function buildConfig(request) {
   var config = CC.getConfig();
-  var token  = PropertiesService.getUserProperties().getProperty('dscc.token');
+  var token  = PropertiesService.getUserProperties().getProperty(TOKEN_KEY);
   var accounts = fetchAdAccounts(token);
 
   var accountSelect = config.newSelectSingle()
@@ -195,7 +201,7 @@ function getData(request) {
 }
 
 function buildData(request) {
-  var token      = PropertiesService.getUserProperties().getProperty('dscc.token');
+  var token      = PropertiesService.getUserProperties().getProperty(TOKEN_KEY);
   var accountId  = request.configParams.ad_account_id;
   var startDate  = request.dateRange.startDate;
   var endDate    = request.dateRange.endDate;
