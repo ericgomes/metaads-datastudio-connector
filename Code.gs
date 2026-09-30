@@ -1,5 +1,5 @@
 var CC = DataStudioApp.createCommunityConnector();
-var META_API_BASE = 'https://graph.facebook.com/v19.0';
+var META_API_BASE = 'https://graph.facebook.com/v23.0';
 
 // ---------------------------------------------------------------------------
 // Auth
