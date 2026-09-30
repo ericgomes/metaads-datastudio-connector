@@ -151,6 +151,7 @@ function getSchema(request) {
   f.newDimension().setId('adset_name').setName('Conjunto de Anúncios').setType(T.TEXT);
   f.newDimension().setId('ad_id').setName('ID Anúncio').setType(T.TEXT);
   f.newDimension().setId('ad_name').setName('Anúncio').setType(T.TEXT);
+  f.newDimension().setId('ad_status').setName('Status do Anúncio').setType(T.TEXT);
   f.newDimension().setId('platform').setName('Plataforma').setType(T.TEXT);
 
   // Metrics
@@ -222,7 +223,7 @@ function buildData(request) {
 
 // Dimensões do schema (o resto de request.fields são métricas).
 var DIMENSION_IDS = ['date', 'year_month', 'account_id', 'account_name', 'campaign_id', 'campaign_name',
-  'adset_id', 'adset_name', 'ad_id', 'ad_name', 'platform'];
+  'adset_id', 'adset_name', 'ad_id', 'ad_name', 'ad_status', 'platform'];
 
 // Métricas derivadas do array `actions` — exigem buscar actions/action_values/video.
 // Inclui as fórmulas cujas bases são de ação (roas→conversion_value, etc.).
@@ -244,6 +245,7 @@ function fetchInsights(token, accountId, startDate, endDate, reqFields) {
   var byDay       = dims.indexOf('date') >= 0;
   var byMonth     = dims.indexOf('year_month') >= 0;
   var needActions = reqFields.some(function (f) { return ACTION_METRIC_IDS.indexOf(f) >= 0; });
+  var needStatus  = reqFields.indexOf('ad_status') >= 0;
 
   var deliveryMetrics = ['impressions', 'clicks', 'spend', 'reach'];
   var actionApiFields = ['actions', 'action_values', 'video_p100_watched_actions'];
@@ -261,7 +263,8 @@ function fetchInsights(token, accountId, startDate, endDate, reqFields) {
     var opts   = { level: level, breakdown: '', increment: increment };
     var fields = (withDate ? ['date_start'] : []).concat(hierarchyFields(level), deliveryMetrics);
     if (needActions) fields = fields.concat(actionApiFields);
-    return fetchInsightsPaged(token, accountId, fields, timeRange(startDate, endDate), opts);
+    var rows = fetchInsightsPaged(token, accountId, fields, timeRange(startDate, endDate), opts);
+    return attachAdStatus(rows, token, accountId, needStatus);
   }
 
   // Com breakdown de plataforma: sempre diário (para a chave de merge ser única
@@ -298,12 +301,62 @@ function fetchInsights(token, accountId, startDate, endDate, reqFields) {
     });
   }
 
-  return deliveryRows;
+  return attachAdStatus(deliveryRows, token, accountId, needStatus);
+}
+
+// Status (Ativo/Pausado) NÃO vem no /insights — é atributo do anúncio. Busca
+// separada em /ads?fields=id,effective_status e merge por ad_id. O status é o
+// ATUAL (não histórico): o Meta não guarda o status "daquele dia".
+function attachAdStatus(rows, token, accountId, needStatus) {
+  if (!needStatus || !rows.length) return rows;
+  var statusMap = fetchAdStatuses(token, accountId);
+  rows.forEach(function (r) {
+    if (r.ad_id) r.ad_status = statusMap[r.ad_id] || '';
+  });
+  return rows;
+}
+
+function fetchAdStatuses(token, accountId) {
+  var url = META_API_BASE + '/' + accountId + '/ads'
+    + '?fields=id,effective_status&limit=500'
+    + '&access_token=' + encodeURIComponent(token);
+  var map = {};
+  while (url) {
+    var resp = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
+    var data = JSON.parse(resp.getContentText());
+    if (data.error) {
+      throw new Error('API do Meta (status) [code ' + data.error.code + ']: ' + data.error.message);
+    }
+    (data.data || []).forEach(function (a) { map[a.id] = translateStatus(a.effective_status); });
+    url = (data.paging && data.paging.next) ? data.paging.next : null;
+  }
+  return map;
+}
+
+// Traduz o effective_status do Meta para rótulos amigáveis (PT-BR).
+var STATUS_LABELS = {
+  ACTIVE:               'Ativo',
+  PAUSED:               'Pausado',
+  ADSET_PAUSED:         'Pausado (conjunto)',
+  CAMPAIGN_PAUSED:      'Pausado (campanha)',
+  PENDING_REVIEW:       'Em análise',
+  DISAPPROVED:          'Reprovado',
+  PREAPPROVED:          'Pré-aprovado',
+  PENDING_BILLING_INFO: 'Aguardando cobrança',
+  IN_PROCESS:           'Em processamento',
+  WITH_ISSUES:          'Com problemas',
+  ARCHIVED:             'Arquivado',
+  DELETED:              'Excluído'
+};
+
+function translateStatus(status) {
+  return STATUS_LABELS[status] || status || '';
 }
 
 // Nível da API do Meta conforme a dimensão de hierarquia mais fina pedida.
 function chooseLevel(dims) {
-  if (dims.indexOf('ad_id') >= 0 || dims.indexOf('ad_name') >= 0) return 'ad';
+  // ad_status é atributo do anúncio → exige o nível 'ad' (join por ad_id).
+  if (dims.indexOf('ad_id') >= 0 || dims.indexOf('ad_name') >= 0 || dims.indexOf('ad_status') >= 0) return 'ad';
   if (dims.indexOf('adset_id') >= 0 || dims.indexOf('adset_name') >= 0) return 'adset';
   if (dims.indexOf('campaign_id') >= 0 || dims.indexOf('campaign_name') >= 0) return 'campaign';
   return 'account';
@@ -395,6 +448,7 @@ function extractValue(fieldName, row) {
     case 'adset_name':       return row.adset_name    || '';
     case 'ad_id':            return row.ad_id         || '';
     case 'ad_name':          return row.ad_name       || '';
+    case 'ad_status':        return row.ad_status     || '';
     case 'platform':         return row.publisher_platform || 'all';
     case 'impressions':      return intVal(row.impressions);
     case 'clicks':           return intVal(row.clicks);
