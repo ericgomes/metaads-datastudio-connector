@@ -36,8 +36,12 @@ function setCredentials(request) {
 function validateToken(token) {
   if (!token) return false;
   try {
+    // Valida em /me/adaccounts (não em /me): exige o escopo `ads_read`, que é o
+    // que o conector realmente precisa. Um token sem essa permissão retorna
+    // erro #200 (Missing Permissions) aqui — assim é rejeitado e o Looker
+    // reexibe a tela de token, em vez de passar e falhar depois no getData.
     var resp = UrlFetchApp.fetch(
-      META_API_BASE + '/me?access_token=' + encodeURIComponent(token),
+      META_API_BASE + '/me/adaccounts?limit=1&access_token=' + encodeURIComponent(token),
       { muteHttpExceptions: true }
     );
     return !JSON.parse(resp.getContentText()).error;
@@ -355,10 +359,12 @@ function fetchInsightsPaged(token, accountId, fieldsArray, timeRangeParam, opts)
     var data = JSON.parse(resp.getContentText());
 
     if (data.error) {
-      CC.newUserError()
-        .setDebugText(JSON.stringify(data.error))
-        .setText('Erro na API do Meta: ' + data.error.message)
-        .throwException();
+      // Propaga a mensagem REAL do Meta (código + texto). Lançar um Error comum
+      // (em vez de CC.newUserError, que o catch do getData re-embrulha em
+      // "Exception" genérico) faz a causa aparecer no diálogo do Looker.
+      throw new Error('API do Meta [code ' + data.error.code
+        + (data.error.error_subcode ? '/' + data.error.error_subcode : '')
+        + ']: ' + data.error.message);
     }
 
     if (data.data) allData = allData.concat(data.data);
